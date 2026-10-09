@@ -24,12 +24,30 @@ reason, not a silent change.
 
 1. **Ground placement.** Valid when the despawning item's own block position
    is empty and the block below it has a solid, sturdy top face (vanilla's
-   usual "can something sit on top of this" check). The settled item is a
-   normal `ItemEntity` -- a real world item-on-ground object, pickable like
-   any other dropped item -- marked with unlimited lifetime so it does not
-   itself expire, and spawned with zero velocity so it settles in place
-   instead of hopping or drifting like a freshly-dropped item. No
-   per-item-kind placement rules in this slice.
+   usual "can something sit on top of this" check). For a non-BLOCK item,
+   the settled item is a normal `ItemEntity` -- a real world item-on-ground
+   object, pickable like any other dropped item -- marked with unlimited
+   lifetime so it does not itself expire, and spawned with zero velocity so
+   it settles in place instead of hopping or drifting like a freshly-dropped
+   item.
+
+   **BLOCK items (MINECRAFT-209/MINECRAFT-205).** A despawning item counts as
+   a "BLOCK item" when its `Item` is a `BlockItem` -- the same notion vanilla
+   itself uses for "an item you can place as a block" (what right-click
+   placement checks), rather than a separate hand-maintained allow-list. For
+   those items, ground placement places the item's corresponding block (at
+   its `defaultBlockState()`) instead of settling a loose item entity.
+   Placement honours a **simplified subset** of the block's own placement
+   rules: the same ground-sturdy check as the non-block path, then the
+   candidate state's own `canSurvive`. It deliberately does NOT run the
+   block's full `BlockPlaceContext`/`BlockItem#useOn` pipeline -- no player,
+   no facing/orientation, no waterlogging -- so a block whose "real"
+   placement depends on that (e.g. stairs' facing) places in its default
+   orientation here rather than being treated as unplaceable. When the block
+   can't be placed (ground invalid, or its own `canSurvive` fails), the
+   despawn cycle falls back to burial of that single item exactly as the
+   non-BLOCK path already did -- ground placement is still always attempted
+   before burial, for both kinds of item.
 
 2. **Burial representation.** The spec calls for "a block-entity store on the
    host block." This repo implements that as a world-level persistent store

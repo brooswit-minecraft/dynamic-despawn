@@ -12,16 +12,13 @@ import static org.mockito.Mockito.when;
 
 import java.util.HashMap;
 import java.util.Map;
-import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
-import net.minecraft.server.Bootstrap;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -33,14 +30,14 @@ import org.junit.jupiter.api.Test;
  * ServerLevel#getDataStorage()}, neither of which this repo has infrastructure for (there was no
  * test infrastructure at all before this ticket). The composed OR-fallback in {@code
  * onItemExpire} is exactly the two methods tested here, called one after the other.
+ *
+ * <p>No {@code Bootstrap.bootStrap()} call: referencing {@code Items}/{@code Blocks} constants
+ * triggers their own static registration eagerly, which is all these tests need; a prior attempt
+ * at calling {@code Bootstrap.bootStrap()} here threw an NPE in this environment (it validates
+ * built-in registries against data this unit-test classpath doesn't carry), so it is deliberately
+ * left out rather than worked around.
  */
 class DespawnGameplayTest {
-
-    @BeforeAll
-    static void bootstrapRegistries() {
-        SharedConstants.tryDetectVersion();
-        Bootstrap.bootStrap();
-    }
 
     @Test
     void isBlockItem_blockItem_true() {

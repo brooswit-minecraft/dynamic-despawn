@@ -19,7 +19,7 @@ import net.minecraft.world.level.saveddata.SavedData;
  * README.md's "Design decisions" section for why. The host block's own type is never changed, so
  * burial never alters world terrain beyond the item becoming recoverable by breaking that block.
  */
-public final class BuriedItemsSavedData extends SavedData implements BurialStore {
+public final class BuriedItemsSavedData extends SavedData {
     private static final String ID = "dynamicdespawn_buried_items";
 
     private final HolderLookup.Provider registries;
@@ -38,12 +38,10 @@ public final class BuriedItemsSavedData extends SavedData implements BurialStore
                 ID);
     }
 
-    @Override
     public boolean isOccupied(BlockPos pos) {
         return buried.containsKey(pos.immutable());
     }
 
-    @Override
     public void bury(BlockPos pos, ItemStack stack) {
         buried.put(pos.immutable(), stack.copy());
         setDirty();

@@ -2,45 +2,30 @@ package io.github.brooswitminecraft.dynamicdespawn;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
 
-import net.minecraft.world.item.BlockItem;
-import net.minecraft.world.item.Item;
-import net.minecraft.world.item.ItemStack;
 import org.junit.jupiter.api.Test;
 
 /**
- * Covers MINECRAFT-209's BLOCK-item membership rule and the pre-existing decrement/timer-reset
- * decision -- the parts of {@code DespawnGameplay} testable at all in this repo's current
- * environment. This repo has no test infrastructure before this ticket and, empirically, cannot
- * run JUnit tests against {@code ServerLevel}: Mockito mocking {@code ServerLevel.class} (even
- * with the subclass mock maker) fails class initialization, because {@code ServerLevel}'s own
- * static init touches vanilla registries ({@code ResourceKey[minecraft:root /
- * minecraft:game_event]}) that require a live FML/NeoForge mod-loading context -- {@code
- * Bootstrap.bootStrap()} itself NPEs on {@code
- * net.neoforged.fml.loading.LoadingModList.get()} returning null in this bare-JUnit setup, and
- * skipping it throws "Not bootstrapped" the moment any real registry constant is touched. This
- * rules out unit-testing {@code tryGroundPlacement}/{@code tryBurial} (both take a {@code
- * ServerLevel}) here; see README.md's design decisions and the MINECRAFT-209 PR description for
- * the full writeup and what it would take to close this gap (a NeoForge GameTest, i.e. a real
- * running server -- this repo has no such harness).
+ * Covers the one part of MINECRAFT-209's change that is actually testable in this repo's current
+ * CI environment: the pre-existing decrement/timer-reset decision (plain {@code int}, no
+ * Minecraft types involved).
  *
- * <p>{@code ItemStack} is a final class (can't be mocked); a real instance is constructed here
- * from a mocked {@link Item}/{@link BlockItem}, which does not touch any registry.
+ * <p>Confirmed empirically (not inferred) that NO Minecraft class can be loaded in this repo's
+ * plain JUnit setup, not even {@code ItemStack}: every one of {@code ServerLevel}, {@code
+ * ItemStack}, and real registry constants ({@code Blocks.*}/{@code Items.*}) throws
+ * "IllegalArgumentException: Not bootstrapped (... minecraft:game_event)" or an equivalent
+ * class-init failure the moment its class is touched -- they all run static init code that
+ * validates against vanilla's registries, which requires a live FML/NeoForge mod-loading context
+ * ({@code Bootstrap.bootStrap()} itself NPEs on {@code
+ * net.neoforged.fml.loading.LoadingModList.get()} returning null here). This rules out unit
+ * tests entirely for {@code isBlockItem}, {@code tryGroundPlacement}, and {@code tryBurial} --
+ * every one of them takes or constructs a Minecraft-typed object. Closing this gap would need a
+ * NeoForge GameTest (a real running server) or the NeoForge JUnit integration this repo's
+ * build.gradle does not currently set up -- out of scope for this ticket; see the MINECRAFT-209
+ * PR description and ticket comments for the full diagnostic trail. In the meantime these paths
+ * are verified by the Brooswit drive-test ask instead.
  */
 class DespawnGameplayTest {
-
-    @Test
-    void isBlockItem_blockItem_true() {
-        ItemStack stack = new ItemStack(mock(BlockItem.class));
-        assertTrue(DespawnGameplay.isBlockItem(stack));
-    }
-
-    @Test
-    void isBlockItem_nonBlockItem_false() {
-        ItemStack stack = new ItemStack(mock(Item.class));
-        assertFalse(DespawnGameplay.isBlockItem(stack));
-    }
 
     @Test
     void shouldResetRemainderTimer_stackGreaterThanOne_true() {

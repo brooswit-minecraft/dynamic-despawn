@@ -64,8 +64,7 @@ public final class DespawnGameplay {
         BlockPos originPos = itemEntity.blockPosition();
         ItemStack single = stack.copyWithCount(1);
 
-        boolean settled =
-            tryGroundPlacement(level, originPos, single) || tryBurial(level, originPos, single, BuriedItemsSavedData.get(level));
+        boolean settled = tryGroundPlacement(level, originPos, single) || tryBurial(level, originPos, single);
         if (!settled) {
             // Neither placement nor burial has a valid destination: do nothing special and let
             // vanilla despawn proceed as normal (we leave event.extraLife at 0). PROVISIONAL
@@ -108,9 +107,9 @@ public final class DespawnGameplay {
      * settle it as a loose item-on-ground. Both share the same ground-validity gate (the despawning
      * item's own position is empty and the block below has a solid, sturdy top face).
      */
-    static boolean tryGroundPlacement(ServerLevel level, BlockPos originPos, ItemStack single) {
-        if (single.getItem() instanceof BlockItem blockItem) {
-            return tryPlaceBlock(level, originPos, blockItem);
+    private static boolean tryGroundPlacement(ServerLevel level, BlockPos originPos, ItemStack single) {
+        if (isBlockItem(single)) {
+            return tryPlaceBlock(level, originPos, (BlockItem) single.getItem());
         }
         return trySettleItemEntity(level, originPos, single);
     }
@@ -173,16 +172,17 @@ public final class DespawnGameplay {
      * in {@link BuriedItemsSavedData}; breaking that block later recovers it (see {@link
      * #onBlockBreak}).
      */
-    static boolean tryBurial(ServerLevel level, BlockPos originPos, ItemStack single, BurialStore store) {
-        BlockPos destination = findBurialDestination(level, originPos, store);
+    private static boolean tryBurial(ServerLevel level, BlockPos originPos, ItemStack single) {
+        BuriedItemsSavedData data = BuriedItemsSavedData.get(level);
+        BlockPos destination = findBurialDestination(level, originPos, data);
         if (destination == null) {
             return false;
         }
-        store.bury(destination, single);
+        data.bury(destination, single);
         return true;
     }
 
-    private static BlockPos findBurialDestination(ServerLevel level, BlockPos originPos, BurialStore store) {
+    private static BlockPos findBurialDestination(ServerLevel level, BlockPos originPos, BuriedItemsSavedData data) {
         List<BlockPos> candidates = new ArrayList<>();
         for (int dx = -BURIAL_SEARCH_RADIUS; dx <= BURIAL_SEARCH_RADIUS; dx++) {
             for (int dy = -BURIAL_SEARCH_RADIUS; dy <= BURIAL_SEARCH_RADIUS; dy++) {
@@ -204,7 +204,7 @@ public final class DespawnGameplay {
             if (!level.isLoaded(pos)) {
                 continue;
             }
-            if (store.isOccupied(pos)) {
+            if (data.isOccupied(pos)) {
                 continue;
             }
             BlockState state = level.getBlockState(pos);

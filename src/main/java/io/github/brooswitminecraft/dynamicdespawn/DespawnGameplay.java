@@ -4,10 +4,12 @@ import com.mojang.logging.LogUtils;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
@@ -63,8 +65,10 @@ public final class DespawnGameplay {
         BlockPos originPos = itemEntity.blockPosition();
         ItemStack single = stack.copyWithCount(1);
 
-        boolean settled = tryGroundPlacement(level, originPos, single) || tryBurial(level, originPos, single);
-        if (!settled) {
+        SettleResult result = settle(
+            count, () -> tryGroundPlacement(level, originPos, single), () -> tryBurial(level, originPos, single));
+
+        if (result.outcome() == SettleOutcome.NONE) {
             // Neither placement nor burial has a valid destination: do nothing special and let
             // vanilla despawn proceed as normal (we leave event.extraLife at 0). PROVISIONAL
             // pending Brooswit's playtest, per MINECRAFT-145's decision comment.
@@ -74,7 +78,7 @@ public final class DespawnGameplay {
             return;
         }
 
-        if (count > 1) {
+        if (result.resetRemainderTimer()) {
             stack.shrink(1);
             itemEntity.setItem(stack);
             event.addExtraLife(RESET_LIFETIME_TICKS);
@@ -83,18 +87,96 @@ public final class DespawnGameplay {
         // this tick -- "a stack of 1 leaves nothing" falls out of the existing vanilla behavior.
     }
 
+    /** Outcome of attempting to settle a single despawning item into the world. */
+    enum SettleOutcome {
+        PLACED,
+        BURIED,
+        NONE
+    }
+
+    /** The outcome of {@link #settle}, plus whether the remainder's timer should be reset. */
+    record SettleResult(SettleOutcome outcome, boolean resetRemainderTimer) {}
+
     /**
-     * Valid ground placement: the item's own block position is empty and the block below it has a
-     * solid, sturdy top face. On success, places a single-item {@link ItemEntity} there with an
-     * unlimited lifetime (it is "settled": a normal world item-on-ground object, pickable like any
-     * other dropped item, that will not itself expire).
+     * Orchestration seam for MINECRAFT-209's review (AC4): ground-before-burial ordering, the
+     * "neither" fallback, and the remainder-timer decision, expressed with no Minecraft types so
+     * it is directly unit-testable. {@code tryBury} is only ever invoked when {@code tryGround}
+     * returns {@code false} -- short-circuit {@code ||} semantics, not just "both happen to run
+     * in order".
+     */
+    static SettleResult settle(int countBeforeSettling, BooleanSupplier tryGround, BooleanSupplier tryBury) {
+        SettleOutcome outcome;
+        if (tryGround.getAsBoolean()) {
+            outcome = SettleOutcome.PLACED;
+        } else if (tryBury.getAsBoolean()) {
+            outcome = SettleOutcome.BURIED;
+        } else {
+            outcome = SettleOutcome.NONE;
+        }
+        boolean resetRemainderTimer = outcome != SettleOutcome.NONE && shouldResetRemainderTimer(countBeforeSettling);
+        return new SettleResult(outcome, resetRemainderTimer);
+    }
+
+    /**
+     * Whether settling/burying one item leaves a remainder that needs its timer reset. Pure
+     * function of the pre-settlement count -- a stack of 1 has nothing left over.
+     */
+    static boolean shouldResetRemainderTimer(int countBeforeSettling) {
+        return countBeforeSettling > 1;
+    }
+
+    /**
+     * {@code true} iff this stack's item is a "BLOCK item" -- one that places a world block, per
+     * MINECRAFT-209's membership rule: the stack's {@link net.minecraft.world.item.Item} is a
+     * {@link BlockItem}. This mirrors vanilla's own notion of "an item you can place as a block"
+     * (the same type right-click-to-place uses) rather than inventing a separate allow-list.
+     */
+    static boolean isBlockItem(ItemStack stack) {
+        return stack.getItem() instanceof BlockItem;
+    }
+
+    /**
+     * Ground placement: for a BLOCK item, place the block it corresponds to; for any other item,
+     * settle it as a loose item-on-ground. Both share the same ground-validity gate (the despawning
+     * item's own position is empty and the block below has a solid, sturdy top face).
      */
     private static boolean tryGroundPlacement(ServerLevel level, BlockPos originPos, ItemStack single) {
-        BlockPos belowPos = originPos.below();
-        if (!level.getBlockState(originPos).isAir()) {
+        if (isBlockItem(single)) {
+            return tryPlaceBlock(level, originPos, (BlockItem) single.getItem());
+        }
+        return trySettleItemEntity(level, originPos, single);
+    }
+
+    /**
+     * BLOCK item ground placement: places the item's corresponding block at its default state on a
+     * valid ground spot, consuming the item in the process (handled by the caller's decrement).
+     * Simplified subset of the block's own placement rules -- this uses {@code Block#defaultBlockState}
+     * plus the same ground-sturdy check as the non-block path, then the resulting state's own
+     * {@code BlockState#canSurvive}, deliberately NOT running the block's full {@code
+     * BlockPlaceContext}/{@code BlockItem#useOn} pipeline (no player, no facing/orientation, no
+     * waterlogging) -- see README.md's design decisions for why. A block whose placement genuinely
+     * depends on that fuller pipeline (e.g. stairs' facing) places in its default orientation here
+     * rather than being excluded.
+     */
+    private static boolean tryPlaceBlock(ServerLevel level, BlockPos originPos, BlockItem blockItem) {
+        if (!isValidGroundSpot(level, originPos)) {
             return false;
         }
-        if (!level.getBlockState(belowPos).isFaceSturdy(level, belowPos, Direction.UP)) {
+        BlockState placeState = blockItem.getBlock().defaultBlockState();
+        if (!placeState.canSurvive(level, originPos)) {
+            return false;
+        }
+        level.setBlock(originPos, placeState, Block.UPDATE_ALL);
+        return true;
+    }
+
+    /**
+     * Non-BLOCK-item ground placement (unchanged from MINECRAFT-151): places a single-item {@link
+     * ItemEntity} there with an unlimited lifetime (it is "settled": a normal world item-on-ground
+     * object, pickable like any other dropped item, that will not itself expire).
+     */
+    private static boolean trySettleItemEntity(ServerLevel level, BlockPos originPos, ItemStack single) {
+        if (!isValidGroundSpot(level, originPos)) {
             return false;
         }
 
@@ -106,6 +188,14 @@ public final class DespawnGameplay {
         placed.setUnlimitedLifetime();
         level.addFreshEntity(placed);
         return true;
+    }
+
+    private static boolean isValidGroundSpot(ServerLevel level, BlockPos originPos) {
+        BlockPos belowPos = originPos.below();
+        if (!level.getBlockState(originPos).isAir()) {
+            return false;
+        }
+        return level.getBlockState(belowPos).isFaceSturdy(level, belowPos, Direction.UP);
     }
 
     /**

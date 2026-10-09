@@ -9,8 +9,10 @@ import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
 
 /**
- * Entry point for Dynamic Despawn (MINECRAFT-146). Registers the mod with no
- * gameplay logic yet; despawn/placement/burial behavior is a later story.
+ * Entry point for Dynamic Despawn. Despawn/placement/burial gameplay is wired
+ * up by {@link DespawnGameplay}, which {@code @EventBusSubscriber} registers
+ * itself on the game event bus; this class only needs to exist for NeoForge
+ * to load the mod.
  */
 @Mod(DynamicDespawnMod.MODID)
 public class DynamicDespawnMod {

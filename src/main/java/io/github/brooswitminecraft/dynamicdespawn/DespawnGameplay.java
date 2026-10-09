@@ -4,6 +4,7 @@ import com.mojang.logging.LogUtils;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -64,8 +65,10 @@ public final class DespawnGameplay {
         BlockPos originPos = itemEntity.blockPosition();
         ItemStack single = stack.copyWithCount(1);
 
-        boolean settled = tryGroundPlacement(level, originPos, single) || tryBurial(level, originPos, single);
-        if (!settled) {
+        SettleResult result = settle(
+            count, () -> tryGroundPlacement(level, originPos, single), () -> tryBurial(level, originPos, single));
+
+        if (result.outcome() == SettleOutcome.NONE) {
             // Neither placement nor burial has a valid destination: do nothing special and let
             // vanilla despawn proceed as normal (we leave event.extraLife at 0). PROVISIONAL
             // pending Brooswit's playtest, per MINECRAFT-145's decision comment.
@@ -75,13 +78,43 @@ public final class DespawnGameplay {
             return;
         }
 
-        if (shouldResetRemainderTimer(count)) {
+        if (result.resetRemainderTimer()) {
             stack.shrink(1);
             itemEntity.setItem(stack);
             event.addExtraLife(RESET_LIFETIME_TICKS);
         }
         // count == 1: extraLife stays 0, so this entity's own vanilla expiry still discards it
         // this tick -- "a stack of 1 leaves nothing" falls out of the existing vanilla behavior.
+    }
+
+    /** Outcome of attempting to settle a single despawning item into the world. */
+    enum SettleOutcome {
+        PLACED,
+        BURIED,
+        NONE
+    }
+
+    /** The outcome of {@link #settle}, plus whether the remainder's timer should be reset. */
+    record SettleResult(SettleOutcome outcome, boolean resetRemainderTimer) {}
+
+    /**
+     * Orchestration seam for MINECRAFT-209's review (AC4): ground-before-burial ordering, the
+     * "neither" fallback, and the remainder-timer decision, expressed with no Minecraft types so
+     * it is directly unit-testable. {@code tryBury} is only ever invoked when {@code tryGround}
+     * returns {@code false} -- short-circuit {@code ||} semantics, not just "both happen to run
+     * in order".
+     */
+    static SettleResult settle(int countBeforeSettling, BooleanSupplier tryGround, BooleanSupplier tryBury) {
+        SettleOutcome outcome;
+        if (tryGround.getAsBoolean()) {
+            outcome = SettleOutcome.PLACED;
+        } else if (tryBury.getAsBoolean()) {
+            outcome = SettleOutcome.BURIED;
+        } else {
+            outcome = SettleOutcome.NONE;
+        }
+        boolean resetRemainderTimer = outcome != SettleOutcome.NONE && shouldResetRemainderTimer(countBeforeSettling);
+        return new SettleResult(outcome, resetRemainderTimer);
     }
 
     /**

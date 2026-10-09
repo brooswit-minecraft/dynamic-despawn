@@ -98,8 +98,11 @@ public final class DespawnGameplay {
             return false;
         }
 
+        // The 7-arg constructor (rather than the 4-arg one) is used deliberately: the 4-arg
+        // constructor gives the item a random horizontal velocity plus an upward kick, which made a
+        // "settled" item visibly hop and drift instead of staying put (review finding on PR #2).
         ItemEntity placed = new ItemEntity(
-            level, originPos.getX() + 0.5, originPos.getY(), originPos.getZ() + 0.5, single);
+            level, originPos.getX() + 0.5, originPos.getY(), originPos.getZ() + 0.5, single, 0.0, 0.0, 0.0);
         placed.setUnlimitedLifetime();
         level.addFreshEntity(placed);
         return true;
@@ -138,6 +141,12 @@ public final class DespawnGameplay {
         candidates.sort(Comparator.comparingDouble(pos -> pos.distSqr(originPos)));
 
         for (BlockPos pos : candidates) {
+            // isLoaded only checks whether the chunk (and the Y level) is already loaded; it never
+            // forces a load. Skipping unloaded candidates here keeps the scan from force-loading
+            // neighbouring chunks (review finding on PR #2 -- a chunk-safety AC).
+            if (!level.isLoaded(pos)) {
+                continue;
+            }
             if (data.isOccupied(pos)) {
                 continue;
             }

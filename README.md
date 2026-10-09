@@ -27,7 +27,9 @@ reason, not a silent change.
    usual "can something sit on top of this" check). The settled item is a
    normal `ItemEntity` -- a real world item-on-ground object, pickable like
    any other dropped item -- marked with unlimited lifetime so it does not
-   itself expire. No per-item-kind placement rules in this slice.
+   itself expire, and spawned with zero velocity so it settles in place
+   instead of hopping or drifting like a freshly-dropped item. No
+   per-item-kind placement rules in this slice.
 
 2. **Burial representation.** The spec calls for "a block-entity store on the
    host block." This repo implements that as a world-level persistent store
@@ -48,7 +50,10 @@ reason, not a silent change.
    **3 blocks** (Chebyshev distance) from the despawning item, already not
    hosting another buried item. Deterministic, no randomness: candidates are
    ordered by squared distance, with ties broken by ascending scan order (x,
-   then y, then z) within the search cube.
+   then y, then z) within the search cube. A candidate in a chunk that isn't
+   currently loaded (checked via `Level#isLoaded`, which never forces a
+   load) is skipped rather than checked -- checking it would force that
+   chunk to load, which the chunk-unload safety requirement rules out.
 
 4. **Neither placement nor burial possible.** Do nothing special --
    vanilla despawn proceeds normally -- and log it. **PROVISIONAL**, pending
@@ -59,7 +64,10 @@ reason, not a silent change.
    - *Chunk unload mid-cycle:* burial data lives in world-level `SavedData`,
      not on a ticking block entity, so it is unaffected by the host block's
      chunk being unloaded; recovery only happens when that block is actually
-     broken, which cannot occur while its chunk is unloaded anyway.
+     broken, which cannot occur while its chunk is unloaded anyway. The
+     burial destination scan itself also never force-loads a chunk to check
+     it (see point 3) -- it treats an unloaded candidate as ineligible rather
+     than loading it to find out.
    - *Despawn firing mid-merge:* vanilla's own `ItemEntity.tick()` merges
      neighboring stacks before checking despawn age in the same tick, so by
      the time `ItemExpireEvent` fires, the entity's `ItemStack` already

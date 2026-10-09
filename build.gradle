@@ -82,6 +82,11 @@ dependencies {
     testImplementation "org.junit.jupiter:junit-jupiter"
     testRuntimeOnly "org.junit.platform:junit-platform-launcher"
     testImplementation "org.mockito:mockito-core:5.14.2"
+
+    // The neoForge moddev plugin wires Minecraft/NeoForge onto sourceSets.main's own classpath,
+    // not onto `test`'s -- without this, test code can't see net.minecraft.* at all.
+    testImplementation sourceSets.main.compileClasspath
+    testRuntimeOnly sourceSets.main.runtimeClasspath
 }
 
 test {

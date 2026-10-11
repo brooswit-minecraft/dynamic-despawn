@@ -170,7 +170,15 @@ public final class DespawnGameplay {
         // checks above and the write). Its boolean is the placement outcome: reporting success
         // here would consume an item and skip the required burial fallback without a block ever
         // appearing.
-        return level.setBlock(originPos, placeState, Block.UPDATE_ALL);
+        return didWorldWriteSucceed(() -> level.setBlock(originPos, placeState, Block.UPDATE_ALL));
+    }
+
+    /**
+     * Narrow, Minecraft-free seam for the boolean returned by {@link ServerLevel#setBlock}.
+     * A successful write is the only ground-write outcome that may be reported as placement.
+     */
+    static boolean didWorldWriteSucceed(BooleanSupplier setBlock) {
+        return setBlock.getAsBoolean();
     }
 
     /**

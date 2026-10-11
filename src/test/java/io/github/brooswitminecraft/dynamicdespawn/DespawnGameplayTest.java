@@ -46,9 +46,9 @@ class DespawnGameplayTest {
     }
 
     @Test
-    void settle_groundSucceeds_buryNeverCalled() {
+    void settle_acceptedWorldWrite_placesOneAndResetsRemainderTimer() {
         AtomicInteger buryCalls = new AtomicInteger();
-        SettleResult result = DespawnGameplay.settle(8, () -> true, () -> {
+        SettleResult result = DespawnGameplay.settle(8, () -> DespawnGameplay.didWorldWriteSucceed(() -> true), () -> {
             buryCalls.incrementAndGet();
             return true;
         });
@@ -59,9 +59,12 @@ class DespawnGameplayTest {
     }
 
     @Test
-    void settle_groundFails_buryIsCalledAndSucceeds() {
+    void settle_rejectedGroundWrite_fallsBackToBurial() {
         AtomicInteger buryCalls = new AtomicInteger();
-        SettleResult result = DespawnGameplay.settle(8, () -> false, () -> {
+        // The Minecraft-typed call cannot run in this plain JUnit environment. Exercise the
+        // extracted result seam that tryPlaceBlock uses: a rejected write must not be PLACED.
+        SettleResult result = DespawnGameplay.settle(
+            8, () -> DespawnGameplay.didWorldWriteSucceed(() -> false), () -> {
             buryCalls.incrementAndGet();
             return true;
         });

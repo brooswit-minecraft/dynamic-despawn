@@ -166,8 +166,11 @@ public final class DespawnGameplay {
         if (!placeState.canSurvive(level, originPos)) {
             return false;
         }
-        level.setBlock(originPos, placeState, Block.UPDATE_ALL);
-        return true;
+        // setBlock can reject a write (for example if the target became invalid between the
+        // checks above and the write). Its boolean is the placement outcome: reporting success
+        // here would consume an item and skip the required burial fallback without a block ever
+        // appearing.
+        return level.setBlock(originPos, placeState, Block.UPDATE_ALL);
     }
 
     /**

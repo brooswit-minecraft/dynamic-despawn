@@ -59,8 +59,11 @@ class DespawnGameplayTest {
     }
 
     @Test
-    void settle_groundFails_buryIsCalledAndSucceeds() {
+    void settle_rejectedGroundWrite_fallsBackToBurial() {
         AtomicInteger buryCalls = new AtomicInteger();
+        // A false ground result represents ServerLevel#setBlock rejecting the write. The
+        // Minecraft-typed call itself cannot run in this plain JUnit environment, so exercise
+        // the extracted outcome seam that onItemExpire uses to decide the fallback.
         SettleResult result = DespawnGameplay.settle(8, () -> false, () -> {
             buryCalls.incrementAndGet();
             return true;

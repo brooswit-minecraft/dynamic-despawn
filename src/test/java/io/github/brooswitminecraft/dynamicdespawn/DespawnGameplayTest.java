@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.brooswitminecraft.dynamicdespawn.DespawnGameplay.SettleOutcome;
 import io.github.brooswitminecraft.dynamicdespawn.DespawnGameplay.SettleResult;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -46,32 +45,31 @@ class DespawnGameplayTest {
     }
 
     @Test
-    void settle_acceptedWorldWrite_placesOneAndResetsRemainderTimer() {
-        AtomicInteger buryCalls = new AtomicInteger();
-        SettleResult result = DespawnGameplay.settle(8, () -> DespawnGameplay.didWorldWriteSucceed(() -> true), () -> {
-            buryCalls.incrementAndGet();
-            return true;
-        });
+    void settleBlockWrite_acceptedWorldWrite_placesOneAndResetsRemainderTimer() {
+        SettleResult result = DespawnGameplay.settleBlockWrite(
+            8, () -> DespawnGameplay.didWorldWriteSucceed(() -> true));
 
         assertEquals(SettleOutcome.PLACED, result.outcome());
-        assertEquals(0, buryCalls.get(), "ground succeeding must short-circuit burial, not just run it in order");
         assertTrue(result.resetRemainderTimer());
     }
 
     @Test
-    void settle_rejectedGroundWrite_fallsBackToBurial() {
-        AtomicInteger buryCalls = new AtomicInteger();
+    void settleBlockWrite_rejectedWorldWrite_despawnsOneWithoutBurial() {
         // The Minecraft-typed call cannot run in this plain JUnit environment. Exercise the
-        // extracted result seam that tryPlaceBlock uses: a rejected write must not be PLACED.
-        SettleResult result = DespawnGameplay.settle(
-            8, () -> DespawnGameplay.didWorldWriteSucceed(() -> false), () -> {
-            buryCalls.incrementAndGet();
-            return true;
-        });
+        // extracted result seam that tryPlaceBlock uses: a rejected write is not retained.
+        SettleResult result = DespawnGameplay.settleBlockWrite(
+            8, () -> DespawnGameplay.didWorldWriteSucceed(() -> false));
 
-        assertEquals(SettleOutcome.BURIED, result.outcome());
-        assertEquals(1, buryCalls.get());
+        assertEquals(SettleOutcome.DESPAWNED, result.outcome());
         assertTrue(result.resetRemainderTimer());
+    }
+
+    @Test
+    void settleBlockWrite_rejectedWorldWrite_stackOfOneLeavesNoRemainderToReset() {
+        SettleResult result = DespawnGameplay.settleBlockWrite(1, () -> false);
+
+        assertEquals(SettleOutcome.DESPAWNED, result.outcome());
+        assertFalse(result.resetRemainderTimer());
     }
 
     @Test

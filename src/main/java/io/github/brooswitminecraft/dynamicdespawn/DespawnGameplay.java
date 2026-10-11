@@ -65,8 +65,9 @@ public final class DespawnGameplay {
         BlockPos originPos = itemEntity.blockPosition();
         ItemStack single = stack.copyWithCount(1);
 
-        SettleResult result = settle(
-            count, () -> tryGroundPlacement(level, originPos, single), () -> tryBurial(level, originPos, single));
+        SettleResult result = isBlockItem(single)
+            ? settleBlockWrite(count, () -> tryPlaceBlock(level, originPos, (BlockItem) single.getItem()))
+            : settle(count, () -> trySettleItemEntity(level, originPos, single), () -> tryBurial(level, originPos, single));
 
         if (result.outcome() == SettleOutcome.NONE) {
             // Neither placement nor burial has a valid destination: do nothing special and let
@@ -91,6 +92,7 @@ public final class DespawnGameplay {
     enum SettleOutcome {
         PLACED,
         BURIED,
+        DESPAWNED,
         NONE
     }
 
@@ -115,6 +117,15 @@ public final class DespawnGameplay {
         }
         boolean resetRemainderTimer = outcome != SettleOutcome.NONE && shouldResetRemainderTimer(countBeforeSettling);
         return new SettleResult(outcome, resetRemainderTimer);
+    }
+
+    /**
+     * BLOCK items never use burial after a rejected world write: burial records recoverable state
+     * in {@link BuriedItemsSavedData}, while the failed attempted item must be consumed/despawned.
+     */
+    static SettleResult settleBlockWrite(int countBeforeSettling, BooleanSupplier tryPlaceBlock) {
+        SettleOutcome outcome = tryPlaceBlock.getAsBoolean() ? SettleOutcome.PLACED : SettleOutcome.DESPAWNED;
+        return new SettleResult(outcome, shouldResetRemainderTimer(countBeforeSettling));
     }
 
     /**

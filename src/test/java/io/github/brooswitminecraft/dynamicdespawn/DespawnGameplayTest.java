@@ -46,7 +46,7 @@ class DespawnGameplayTest {
     void resolveNonBlock_skipsFullBarrelAndUsesFirstBarrelWithCapacity() {
         AtomicInteger barrelChecks = new AtomicInteger();
         SettleResult result = DespawnGameplay.resolveNonBlock(8,
-            List.of(() -> barrelChecks.incrementAndGet() == 1, () -> barrelChecks.incrementAndGet() == 2),
+            List.of(() -> barrelChecks.incrementAndGet() == 2, () -> barrelChecks.incrementAndGet() == 2),
             List.of(() -> { throw new AssertionError("new barrel must not be created"); }));
 
         assertEquals(SettleOutcome.STORED, result.outcome());

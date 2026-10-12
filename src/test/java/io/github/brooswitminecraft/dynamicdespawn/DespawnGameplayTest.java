@@ -46,7 +46,8 @@ class DespawnGameplayTest {
     void resolveNonBlock_skipsFullBarrelAndUsesFirstBarrelWithCapacity() {
         AtomicInteger barrelChecks = new AtomicInteger();
         SettleResult result = DespawnGameplay.resolveNonBlock(8,
-            () -> barrelChecks.incrementAndGet() == 2, List.of(() -> { throw new AssertionError("new barrel must not be created"); }));
+            List.of(() -> barrelChecks.incrementAndGet() == 1, () -> barrelChecks.incrementAndGet() == 2),
+            List.of(() -> { throw new AssertionError("new barrel must not be created"); }));
 
         assertEquals(SettleOutcome.STORED, result.outcome());
         assertTrue(result.resetRemainderTimer());
@@ -56,7 +57,7 @@ class DespawnGameplayTest {
     @Test
     void resolveNonBlock_noExistingCapacity_createsAtFirstValidCandidate() {
         List<Integer> attempted = new ArrayList<>();
-        SettleResult result = DespawnGameplay.resolveNonBlock(3, () -> false, attempts(attempted, false, true, true));
+        SettleResult result = DespawnGameplay.resolveNonBlock(3, List.of(() -> false), attempts(attempted, false, true, true));
 
         assertEquals(SettleOutcome.STORED, result.outcome());
         assertTrue(result.resetRemainderTimer());
@@ -65,7 +66,7 @@ class DespawnGameplayTest {
 
     @Test
     void resolveNonBlock_noStorageOrBarrelPosition_despawnsOneAndLeavesStackOfOneUntouched() {
-        SettleResult result = DespawnGameplay.resolveNonBlock(1, () -> false, List.of(() -> false));
+        SettleResult result = DespawnGameplay.resolveNonBlock(1, List.of(() -> false), List.of(() -> false));
 
         assertEquals(SettleOutcome.DESPAWNED, result.outcome());
         assertFalse(result.resetRemainderTimer(), "a stack of one has no remainder to reset");

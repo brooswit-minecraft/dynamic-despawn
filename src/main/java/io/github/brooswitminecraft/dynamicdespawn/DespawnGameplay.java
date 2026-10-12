@@ -51,7 +51,7 @@ public final class DespawnGameplay {
         List<BlockPos> candidates = placementCandidates(originPos);
         SettleResult result = isBlockItem(single)
             ? resolvePlacement(count, placementAttempts(level, candidates, (BlockItem) single.getItem()))
-            : resolveNonBlock(count, () -> tryStoreInNearbyBarrel(level, originPos, single),
+            : resolveNonBlock(count, nearbyBarrelAttempts(level, originPos, single),
                 barrelCreationAttempts(level, candidates, single));
 
         // Every authoritative path consumes exactly one. For a stack of one, vanilla's expiry
@@ -120,10 +120,12 @@ public final class DespawnGameplay {
     }
 
     /** Stores in an existing barrel first, then tries new-barrel positions, then deletes one. */
-    static SettleResult resolveNonBlock(int countBeforeSettling, BooleanSupplier tryExistingBarrel,
+    static SettleResult resolveNonBlock(int countBeforeSettling, List<BooleanSupplier> existingBarrelAttempts,
             List<BooleanSupplier> newBarrelAttempts) {
-        if (tryExistingBarrel.getAsBoolean()) {
-            return result(SettleOutcome.STORED, countBeforeSettling);
+        for (BooleanSupplier attempt : existingBarrelAttempts) {
+            if (attempt.getAsBoolean()) {
+                return result(SettleOutcome.STORED, countBeforeSettling);
+            }
         }
         for (BooleanSupplier attempt : newBarrelAttempts) {
             if (attempt.getAsBoolean()) {
@@ -164,15 +166,8 @@ public final class DespawnGameplay {
         return candidates.stream().<BooleanSupplier>map(pos -> () -> tryCreateBarrel(level, pos, single)).toList();
     }
 
-    private static boolean tryPlaceBlock(ServerLevel level, BlockPos pos, BlockItem blockItem) {
-        if (!isValidGroundSpot(level, pos)) {
-            return false;
-        }
-        BlockState placeState = blockItem.getBlock().defaultBlockState();
-        return placeState.canSurvive(level, pos) && level.setBlock(pos, placeState, Block.UPDATE_ALL);
-    }
-
-    private static boolean tryStoreInNearbyBarrel(ServerLevel level, BlockPos origin, ItemStack single) {
+    private static List<BooleanSupplier> nearbyBarrelAttempts(ServerLevel level, BlockPos origin, ItemStack single) {
+        List<BooleanSupplier> attempts = new ArrayList<>();
         for (int dx = -BARREL_SEARCH_RADIUS; dx <= BARREL_SEARCH_RADIUS; dx++) {
             for (int dy = -BARREL_SEARCH_RADIUS; dy <= BARREL_SEARCH_RADIUS; dy++) {
                 for (int dz = -BARREL_SEARCH_RADIUS; dz <= BARREL_SEARCH_RADIUS; dz++) {
@@ -180,17 +175,24 @@ public final class DespawnGameplay {
                         continue;
                     }
                     BlockPos pos = origin.offset(dx, dy, dz);
-                    if (!level.isLoaded(pos)) {
-                        continue;
-                    }
-                    BlockEntity blockEntity = level.getBlockEntity(pos);
-                    if (blockEntity instanceof BarrelBlockEntity barrel && insertOne(barrel, single)) {
-                        return true;
+                    if (level.isLoaded(pos)) {
+                        attempts.add(() -> {
+                            BlockEntity blockEntity = level.getBlockEntity(pos);
+                            return blockEntity instanceof BarrelBlockEntity barrel && insertOne(barrel, single);
+                        });
                     }
                 }
             }
         }
-        return false;
+        return attempts;
+    }
+
+    private static boolean tryPlaceBlock(ServerLevel level, BlockPos pos, BlockItem blockItem) {
+        if (!isValidGroundSpot(level, pos)) {
+            return false;
+        }
+        BlockState placeState = blockItem.getBlock().defaultBlockState();
+        return placeState.canSurvive(level, pos) && level.setBlock(pos, placeState, Block.UPDATE_ALL);
     }
 
     private static boolean tryCreateBarrel(ServerLevel level, BlockPos pos, ItemStack single) {

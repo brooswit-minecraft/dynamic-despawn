@@ -4,95 +4,83 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.brooswitminecraft.dynamicdespawn.DespawnGameplay.PlacementOffset;
 import io.github.brooswitminecraft.dynamicdespawn.DespawnGameplay.SettleOutcome;
 import io.github.brooswitminecraft.dynamicdespawn.DespawnGameplay.SettleResult;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 
-/**
- * Covers the part of MINECRAFT-209's change that is testable in this repo's current CI
- * environment: the pre-existing decrement/timer-reset decision, and (per the PR #4 review) the
- * ground-before-burial orchestration seam ({@link DespawnGameplay#settle}), extracted
- * specifically so it can be exercised with plain {@code BooleanSupplier} args instead of real
- * Minecraft types.
- *
- * <p>Confirmed empirically (not inferred) that NO Minecraft class can be loaded in this repo's
- * plain JUnit setup, not even {@code ItemStack}: every one of {@code ServerLevel}, {@code
- * ItemStack}, and real registry constants ({@code Blocks.*}/{@code Items.*}) throws
- * "IllegalArgumentException: Not bootstrapped (... minecraft:game_event)" or an equivalent
- * class-init failure the moment its class is touched -- they all run static init code that
- * validates against vanilla's registries, which requires a live FML/NeoForge mod-loading context
- * ({@code Bootstrap.bootStrap()} itself NPEs on {@code
- * net.neoforged.fml.loading.LoadingModList.get()} returning null here). This rules out unit
- * tests entirely for {@code isBlockItem}, {@code tryGroundPlacement}, and {@code tryBurial}
- * themselves -- every one of them takes or constructs a Minecraft-typed object. Closing that gap
- * would need a NeoForge GameTest (a real running server) or the NeoForge JUnit integration this
- * repo's build.gradle does not currently set up -- out of scope for this ticket; see the
- * MINECRAFT-209 PR description and ticket comments for the full diagnostic trail. The
- * ground-before-burial ORDERING and the outcome/remainder-timer DECISION are covered here; the
- * world-interaction paths themselves (actually placing a block, actually burying) are verified by
- * the Brooswit drive-test ask instead.
- */
+/** Tests the Minecraft-free routing seams; real world/block-entity interaction needs GameTest. */
 class DespawnGameplayTest {
-
     @Test
-    void shouldResetRemainderTimer_stackGreaterThanOne_true() {
-        assertTrue(DespawnGameplay.shouldResetRemainderTimer(8));
+    void placementOrder_keepsCurrentThenProvidedRandomHorizontalOrderThenAbove() {
+        List<PlacementOffset> order = DespawnGameplay.placementOrder(List.of(
+            PlacementOffset.WEST, PlacementOffset.NORTH, PlacementOffset.EAST, PlacementOffset.SOUTH));
+
+        assertEquals(List.of(PlacementOffset.CURRENT, PlacementOffset.WEST, PlacementOffset.NORTH,
+            PlacementOffset.EAST, PlacementOffset.SOUTH, PlacementOffset.ABOVE), order);
     }
 
     @Test
-    void shouldResetRemainderTimer_stackOfOne_false() {
-        assertFalse(DespawnGameplay.shouldResetRemainderTimer(1));
-    }
-
-    @Test
-    void settleBlockWrite_acceptedWorldWrite_placesOneAndResetsRemainderTimer() {
-        SettleResult result = DespawnGameplay.settleBlockWrite(
-            8, () -> DespawnGameplay.didWorldWriteSucceed(() -> true));
+    void resolvePlacement_stopsAtFirstValidCandidateAndResetsMultiStackRemainder() {
+        List<Integer> attempted = new ArrayList<>();
+        SettleResult result = DespawnGameplay.resolvePlacement(8, attempts(attempted, false, false, true, true));
 
         assertEquals(SettleOutcome.PLACED, result.outcome());
         assertTrue(result.resetRemainderTimer());
+        assertEquals(List.of(0, 1, 2), attempted, "must not consume or try candidates after first placement");
     }
 
     @Test
-    void settleBlockWrite_rejectedWorldWrite_despawnsOneWithoutBurial() {
-        // The Minecraft-typed call cannot run in this plain JUnit environment. Exercise the
-        // extracted result seam that tryPlaceBlock uses: a rejected write is not retained.
-        SettleResult result = DespawnGameplay.settleBlockWrite(
-            8, () -> DespawnGameplay.didWorldWriteSucceed(() -> false));
+    void resolvePlacement_noValidCandidate_despawnsOneAndPreservesMultiStackRemainder() {
+        SettleResult result = DespawnGameplay.resolvePlacement(8, List.of(() -> false, () -> false));
 
         assertEquals(SettleOutcome.DESPAWNED, result.outcome());
         assertTrue(result.resetRemainderTimer());
     }
 
     @Test
-    void settleBlockWrite_rejectedWorldWrite_stackOfOneLeavesNoRemainderToReset() {
-        SettleResult result = DespawnGameplay.settleBlockWrite(1, () -> false);
+    void resolveNonBlock_skipsFullBarrelAndUsesFirstBarrelWithCapacity() {
+        AtomicInteger barrelChecks = new AtomicInteger();
+        SettleResult result = DespawnGameplay.resolveNonBlock(8,
+            () -> barrelChecks.incrementAndGet() == 2, List.of(() -> { throw new AssertionError("new barrel must not be created"); }));
+
+        assertEquals(SettleOutcome.STORED, result.outcome());
+        assertTrue(result.resetRemainderTimer());
+        assertEquals(2, barrelChecks.get(), "the first/full barrel is skipped before available capacity is used");
+    }
+
+    @Test
+    void resolveNonBlock_noExistingCapacity_createsAtFirstValidCandidate() {
+        List<Integer> attempted = new ArrayList<>();
+        SettleResult result = DespawnGameplay.resolveNonBlock(3, () -> false, attempts(attempted, false, true, true));
+
+        assertEquals(SettleOutcome.STORED, result.outcome());
+        assertTrue(result.resetRemainderTimer());
+        assertEquals(List.of(0, 1), attempted);
+    }
+
+    @Test
+    void resolveNonBlock_noStorageOrBarrelPosition_despawnsOneAndLeavesStackOfOneUntouched() {
+        SettleResult result = DespawnGameplay.resolveNonBlock(1, () -> false, List.of(() -> false));
 
         assertEquals(SettleOutcome.DESPAWNED, result.outcome());
-        assertFalse(result.resetRemainderTimer());
+        assertFalse(result.resetRemainderTimer(), "a stack of one has no remainder to reset");
     }
 
-    @Test
-    void settle_groundAndBuryBothFail_outcomeNoneAndNoRemainderReset() {
-        SettleResult result = DespawnGameplay.settle(8, () -> false, () -> false);
-
-        assertEquals(SettleOutcome.NONE, result.outcome());
-        assertFalse(result.resetRemainderTimer(), "no settlement happened, so there is nothing to reset a timer for");
-    }
-
-    @Test
-    void settle_stackOfOne_placedLeavesNoRemainderToReset() {
-        SettleResult result = DespawnGameplay.settle(1, () -> true, () -> false);
-
-        assertEquals(SettleOutcome.PLACED, result.outcome());
-        assertFalse(result.resetRemainderTimer(), "a stack of 1 leaves no remainder, so its timer is never reset");
-    }
-
-    @Test
-    void settle_stackGreaterThanOne_buriedResetsRemainderTimer() {
-        SettleResult result = DespawnGameplay.settle(3, () -> false, () -> true);
-
-        assertEquals(SettleOutcome.BURIED, result.outcome());
-        assertTrue(result.resetRemainderTimer());
+    private static List<BooleanSupplier> attempts(List<Integer> attempted, boolean... results) {
+        List<BooleanSupplier> attempts = new ArrayList<>();
+        for (int index = 0; index < results.length; index++) {
+            int candidate = index;
+            boolean result = results[index];
+            attempts.add(() -> {
+                attempted.add(candidate);
+                return result;
+            });
+        }
+        return attempts;
     }
 }

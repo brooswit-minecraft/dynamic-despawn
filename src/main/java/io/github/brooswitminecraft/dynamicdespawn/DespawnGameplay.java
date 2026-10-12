@@ -2,7 +2,7 @@ package io.github.brooswitminecraft.dynamicdespawn;
 
 import com.mojang.logging.LogUtils;
 import java.util.ArrayList;
-import java.util.Comparator;
+import java.util.Collections;
 import java.util.List;
 import java.util.function.BooleanSupplier;
 import net.minecraft.core.BlockPos;
@@ -11,7 +11,11 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.BarrelBlock;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.entity.BarrelBlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
@@ -19,33 +23,13 @@ import net.neoforged.neoforge.event.entity.item.ItemExpireEvent;
 import net.neoforged.neoforge.event.level.BlockEvent;
 import org.slf4j.Logger;
 
-/**
- * Core despawn behavior (MINECRAFT-147 / MINECRAFT-151): at a dropped-item
- * stack's natural despawn point, settle exactly one item into the world (or
- * bury it if there's nowhere valid to place it), decrement the stack by one,
- * and reset the remaining stack's timer. See README.md for the design
- * decisions this class implements (burial radius, tie-break, and the
- * "neither" fallback).
- */
+/** Implements the one-item-at-a-time authoritative despawn behavior. */
 @EventBusSubscriber(modid = DynamicDespawnMod.MODID)
 public final class DespawnGameplay {
     private static final Logger LOGGER = LogUtils.getLogger();
 
-    /**
-     * Matches vanilla's own default item despawn time ({@code ItemEntity.LIFETIME},
-     * which is private). The remaining stack's despawn timer is reset to a full
-     * span of this length. Items whose own lifespan differs from vanilla's
-     * default (e.g. via {@code Item#getEntityLifespan}) are out of scope for
-     * this slice's one-item-type behavior.
-     */
     static final int RESET_LIFETIME_TICKS = 6000;
-
-    /**
-     * The "small fixed radius" MINECRAFT-145's decision comment calls for.
-     * Burial searches a cube of this radius (Chebyshev distance) centered on
-     * the despawning item, in blocks.
-     */
-    static final int BURIAL_SEARCH_RADIUS = 3;
+    static final int BARREL_SEARCH_RADIUS = 16;
 
     private DespawnGameplay() {}
 
@@ -64,217 +48,193 @@ public final class DespawnGameplay {
 
         BlockPos originPos = itemEntity.blockPosition();
         ItemStack single = stack.copyWithCount(1);
-
+        List<BlockPos> candidates = placementCandidates(originPos);
         SettleResult result = isBlockItem(single)
-            ? settleBlockWrite(count, () -> tryPlaceBlock(level, originPos, (BlockItem) single.getItem()))
-            : settle(count, () -> trySettleItemEntity(level, originPos, single), () -> tryBurial(level, originPos, single));
+            ? resolvePlacement(count, placementAttempts(level, candidates, (BlockItem) single.getItem()))
+            : resolveNonBlock(count, () -> tryStoreInNearbyBarrel(level, originPos, single),
+                barrelCreationAttempts(level, candidates, single));
 
-        if (result.outcome() == SettleOutcome.NONE) {
-            // Neither placement nor burial has a valid destination: do nothing special and let
-            // vanilla despawn proceed as normal (we leave event.extraLife at 0). PROVISIONAL
-            // pending Brooswit's playtest, per MINECRAFT-145's decision comment.
-            LOGGER.info(
-                "[dynamicdespawn] no valid ground placement or burial destination for {} near {}; vanilla despawn proceeds",
-                stack.getItem(), originPos);
-            return;
-        }
-
+        // Every authoritative path consumes exactly one. For a stack of one, vanilla's expiry
+        // consumes the entity this tick; for a larger stack we retain and reset only the remainder.
         if (result.resetRemainderTimer()) {
             stack.shrink(1);
             itemEntity.setItem(stack);
             event.addExtraLife(RESET_LIFETIME_TICKS);
         }
-        // count == 1: extraLife stays 0, so this entity's own vanilla expiry still discards it
-        // this tick -- "a stack of 1 leaves nothing" falls out of the existing vanilla behavior.
+        LOGGER.debug("[dynamicdespawn] {} one {} at {}", result.outcome(), stack.getItem(), originPos);
     }
 
-    /** Outcome of attempting to settle a single despawning item into the world. */
     enum SettleOutcome {
         PLACED,
-        BURIED,
-        DESPAWNED,
-        NONE
+        STORED,
+        DESPAWNED
     }
 
-    /** The outcome of {@link #settle}, plus whether the remainder's timer should be reset. */
     record SettleResult(SettleOutcome outcome, boolean resetRemainderTimer) {}
 
-    /**
-     * Orchestration seam for MINECRAFT-209's review (AC4): ground-before-burial ordering, the
-     * "neither" fallback, and the remainder-timer decision, expressed with no Minecraft types so
-     * it is directly unit-testable. {@code tryBury} is only ever invoked when {@code tryGround}
-     * returns {@code false} -- short-circuit {@code ||} semantics, not just "both happen to run
-     * in order".
-     */
-    static SettleResult settle(int countBeforeSettling, BooleanSupplier tryGround, BooleanSupplier tryBury) {
-        SettleOutcome outcome;
-        if (tryGround.getAsBoolean()) {
-            outcome = SettleOutcome.PLACED;
-        } else if (tryBury.getAsBoolean()) {
-            outcome = SettleOutcome.BURIED;
-        } else {
-            outcome = SettleOutcome.NONE;
+    /** A Minecraft-free representation of the required candidate sequence. */
+    enum PlacementOffset {
+        CURRENT(0, 0, 0),
+        NORTH(0, 0, -1),
+        SOUTH(0, 0, 1),
+        WEST(-1, 0, 0),
+        EAST(1, 0, 0),
+        ABOVE(0, 1, 0);
+
+        final int x;
+        final int y;
+        final int z;
+
+        PlacementOffset(int x, int y, int z) {
+            this.x = x;
+            this.y = y;
+            this.z = z;
         }
-        boolean resetRemainderTimer = outcome != SettleOutcome.NONE && shouldResetRemainderTimer(countBeforeSettling);
-        return new SettleResult(outcome, resetRemainderTimer);
     }
 
     /**
-     * BLOCK items never use burial after a rejected world write: burial records recoverable state
-     * in {@link BuriedItemsSavedData}, while the failed attempted item must be consumed/despawned.
+     * Builds the required search order. Callers supply the randomized horizontal permutation so
+     * this contract can be tested without a Minecraft runtime.
      */
-    static SettleResult settleBlockWrite(int countBeforeSettling, BooleanSupplier tryPlaceBlock) {
-        SettleOutcome outcome = tryPlaceBlock.getAsBoolean() ? SettleOutcome.PLACED : SettleOutcome.DESPAWNED;
+    static List<PlacementOffset> placementOrder(List<PlacementOffset> horizontalOrder) {
+        if (horizontalOrder.size() != 4
+            || !horizontalOrder.containsAll(List.of(PlacementOffset.NORTH, PlacementOffset.SOUTH,
+                PlacementOffset.WEST, PlacementOffset.EAST))) {
+            throw new IllegalArgumentException("horizontal order must contain each horizontal neighbour once");
+        }
+        List<PlacementOffset> order = new ArrayList<>(6);
+        order.add(PlacementOffset.CURRENT);
+        order.addAll(horizontalOrder);
+        order.add(PlacementOffset.ABOVE);
+        return List.copyOf(order);
+    }
+
+    /** Returns PLACED at the first successful candidate; all failures consume one item. */
+    static SettleResult resolvePlacement(int countBeforeSettling, List<BooleanSupplier> attempts) {
+        for (BooleanSupplier attempt : attempts) {
+            if (attempt.getAsBoolean()) {
+                return result(SettleOutcome.PLACED, countBeforeSettling);
+            }
+        }
+        return result(SettleOutcome.DESPAWNED, countBeforeSettling);
+    }
+
+    /** Stores in an existing barrel first, then tries new-barrel positions, then deletes one. */
+    static SettleResult resolveNonBlock(int countBeforeSettling, BooleanSupplier tryExistingBarrel,
+            List<BooleanSupplier> newBarrelAttempts) {
+        if (tryExistingBarrel.getAsBoolean()) {
+            return result(SettleOutcome.STORED, countBeforeSettling);
+        }
+        for (BooleanSupplier attempt : newBarrelAttempts) {
+            if (attempt.getAsBoolean()) {
+                return result(SettleOutcome.STORED, countBeforeSettling);
+            }
+        }
+        return result(SettleOutcome.DESPAWNED, countBeforeSettling);
+    }
+
+    private static SettleResult result(SettleOutcome outcome, int countBeforeSettling) {
         return new SettleResult(outcome, shouldResetRemainderTimer(countBeforeSettling));
     }
 
-    /**
-     * Whether settling/burying one item leaves a remainder that needs its timer reset. Pure
-     * function of the pre-settlement count -- a stack of 1 has nothing left over.
-     */
     static boolean shouldResetRemainderTimer(int countBeforeSettling) {
         return countBeforeSettling > 1;
     }
 
-    /**
-     * {@code true} iff this stack's item is a "BLOCK item" -- one that places a world block, per
-     * MINECRAFT-209's membership rule: the stack's {@link net.minecraft.world.item.Item} is a
-     * {@link BlockItem}. This mirrors vanilla's own notion of "an item you can place as a block"
-     * (the same type right-click-to-place uses) rather than inventing a separate allow-list.
-     */
     static boolean isBlockItem(ItemStack stack) {
         return stack.getItem() instanceof BlockItem;
     }
 
-    /**
-     * Ground placement: for a BLOCK item, place the block it corresponds to; for any other item,
-     * settle it as a loose item-on-ground. Both share the same ground-validity gate (the despawning
-     * item's own position is empty and the block below has a solid, sturdy top face).
-     */
-    private static boolean tryGroundPlacement(ServerLevel level, BlockPos originPos, ItemStack single) {
-        if (isBlockItem(single)) {
-            return tryPlaceBlock(level, originPos, (BlockItem) single.getItem());
-        }
-        return trySettleItemEntity(level, originPos, single);
+    private static List<BlockPos> placementCandidates(BlockPos origin) {
+        List<PlacementOffset> horizontal = new ArrayList<>(List.of(
+            PlacementOffset.NORTH, PlacementOffset.SOUTH, PlacementOffset.WEST, PlacementOffset.EAST));
+        Collections.shuffle(horizontal);
+        return placementOrder(horizontal).stream()
+            .map(offset -> origin.offset(offset.x, offset.y, offset.z))
+            .toList();
     }
 
-    /**
-     * BLOCK item ground placement: places the item's corresponding block at its default state on a
-     * valid ground spot, consuming the item in the process (handled by the caller's decrement).
-     * Simplified subset of the block's own placement rules -- this uses {@code Block#defaultBlockState}
-     * plus the same ground-sturdy check as the non-block path, then the resulting state's own
-     * {@code BlockState#canSurvive}, deliberately NOT running the block's full {@code
-     * BlockPlaceContext}/{@code BlockItem#useOn} pipeline (no player, no facing/orientation, no
-     * waterlogging) -- see README.md's design decisions for why. A block whose placement genuinely
-     * depends on that fuller pipeline (e.g. stairs' facing) places in its default orientation here
-     * rather than being excluded.
-     */
-    private static boolean tryPlaceBlock(ServerLevel level, BlockPos originPos, BlockItem blockItem) {
-        if (!isValidGroundSpot(level, originPos)) {
+    private static List<BooleanSupplier> placementAttempts(ServerLevel level, List<BlockPos> candidates,
+            BlockItem blockItem) {
+        return candidates.stream().<BooleanSupplier>map(pos -> () -> tryPlaceBlock(level, pos, blockItem)).toList();
+    }
+
+    private static List<BooleanSupplier> barrelCreationAttempts(ServerLevel level, List<BlockPos> candidates,
+            ItemStack single) {
+        return candidates.stream().<BooleanSupplier>map(pos -> () -> tryCreateBarrel(level, pos, single)).toList();
+    }
+
+    private static boolean tryPlaceBlock(ServerLevel level, BlockPos pos, BlockItem blockItem) {
+        if (!isValidGroundSpot(level, pos)) {
             return false;
         }
         BlockState placeState = blockItem.getBlock().defaultBlockState();
-        if (!placeState.canSurvive(level, originPos)) {
-            return false;
-        }
-        // setBlock can reject a write (for example if the target became invalid between the
-        // checks above and the write). Its boolean is the placement outcome: reporting success
-        // here would consume an item and skip the required burial fallback without a block ever
-        // appearing.
-        return didWorldWriteSucceed(() -> level.setBlock(originPos, placeState, Block.UPDATE_ALL));
+        return placeState.canSurvive(level, pos) && level.setBlock(pos, placeState, Block.UPDATE_ALL);
     }
 
-    /**
-     * Narrow, Minecraft-free seam for the boolean returned by {@link ServerLevel#setBlock}.
-     * A successful write is the only ground-write outcome that may be reported as placement.
-     */
-    static boolean didWorldWriteSucceed(BooleanSupplier setBlock) {
-        return setBlock.getAsBoolean();
-    }
-
-    /**
-     * Non-BLOCK-item ground placement (unchanged from MINECRAFT-151): places a single-item {@link
-     * ItemEntity} there with an unlimited lifetime (it is "settled": a normal world item-on-ground
-     * object, pickable like any other dropped item, that will not itself expire).
-     */
-    private static boolean trySettleItemEntity(ServerLevel level, BlockPos originPos, ItemStack single) {
-        if (!isValidGroundSpot(level, originPos)) {
-            return false;
-        }
-
-        // The 7-arg constructor (rather than the 4-arg one) is used deliberately: the 4-arg
-        // constructor gives the item a random horizontal velocity plus an upward kick, which made a
-        // "settled" item visibly hop and drift instead of staying put (review finding on PR #2).
-        ItemEntity placed = new ItemEntity(
-            level, originPos.getX() + 0.5, originPos.getY(), originPos.getZ() + 0.5, single, 0.0, 0.0, 0.0);
-        placed.setUnlimitedLifetime();
-        level.addFreshEntity(placed);
-        return true;
-    }
-
-    private static boolean isValidGroundSpot(ServerLevel level, BlockPos originPos) {
-        BlockPos belowPos = originPos.below();
-        if (!level.getBlockState(originPos).isAir()) {
-            return false;
-        }
-        return level.getBlockState(belowPos).isFaceSturdy(level, belowPos, Direction.UP);
-    }
-
-    /**
-     * Burial destination: the nearest eligible solid block within {@link #BURIAL_SEARCH_RADIUS},
-     * chosen deterministically (ties broken by ascending scan order -- x, then y, then z -- within
-     * the search volume; no randomness). On success, records the item against that block's position
-     * in {@link BuriedItemsSavedData}; breaking that block later recovers it (see {@link
-     * #onBlockBreak}).
-     */
-    private static boolean tryBurial(ServerLevel level, BlockPos originPos, ItemStack single) {
-        BuriedItemsSavedData data = BuriedItemsSavedData.get(level);
-        BlockPos destination = findBurialDestination(level, originPos, data);
-        if (destination == null) {
-            return false;
-        }
-        data.bury(destination, single);
-        return true;
-    }
-
-    private static BlockPos findBurialDestination(ServerLevel level, BlockPos originPos, BuriedItemsSavedData data) {
-        List<BlockPos> candidates = new ArrayList<>();
-        for (int dx = -BURIAL_SEARCH_RADIUS; dx <= BURIAL_SEARCH_RADIUS; dx++) {
-            for (int dy = -BURIAL_SEARCH_RADIUS; dy <= BURIAL_SEARCH_RADIUS; dy++) {
-                for (int dz = -BURIAL_SEARCH_RADIUS; dz <= BURIAL_SEARCH_RADIUS; dz++) {
-                    if (dx == 0 && dy == 0 && dz == 0) {
+    private static boolean tryStoreInNearbyBarrel(ServerLevel level, BlockPos origin, ItemStack single) {
+        for (int dx = -BARREL_SEARCH_RADIUS; dx <= BARREL_SEARCH_RADIUS; dx++) {
+            for (int dy = -BARREL_SEARCH_RADIUS; dy <= BARREL_SEARCH_RADIUS; dy++) {
+                for (int dz = -BARREL_SEARCH_RADIUS; dz <= BARREL_SEARCH_RADIUS; dz++) {
+                    if (dx * dx + dy * dy + dz * dz > BARREL_SEARCH_RADIUS * BARREL_SEARCH_RADIUS) {
                         continue;
                     }
-                    candidates.add(originPos.offset(dx, dy, dz));
+                    BlockPos pos = origin.offset(dx, dy, dz);
+                    if (!level.isLoaded(pos)) {
+                        continue;
+                    }
+                    BlockEntity blockEntity = level.getBlockEntity(pos);
+                    if (blockEntity instanceof BarrelBlockEntity barrel && insertOne(barrel, single)) {
+                        return true;
+                    }
                 }
             }
         }
-        // List.sort is stable, so candidates that tie on distance keep the scan order above.
-        candidates.sort(Comparator.comparingDouble(pos -> pos.distSqr(originPos)));
-
-        for (BlockPos pos : candidates) {
-            // isLoaded only checks whether the chunk (and the Y level) is already loaded; it never
-            // forces a load. Skipping unloaded candidates here keeps the scan from force-loading
-            // neighbouring chunks (review finding on PR #2 -- a chunk-safety AC).
-            if (!level.isLoaded(pos)) {
-                continue;
-            }
-            if (data.isOccupied(pos)) {
-                continue;
-            }
-            BlockState state = level.getBlockState(pos);
-            if (state.isFaceSturdy(level, pos, Direction.UP)) {
-                return pos;
-            }
-        }
-        return null;
+        return false;
     }
 
-    /**
-     * Burial recovery: breaking the host block drops the buried item back out. Only a direct break
-     * of that exact block recovers it (see README.md's "Known limitations" section) -- an explosion,
-     * piston, or other silent removal of the host block loses the buried item along with it.
-     */
+    private static boolean tryCreateBarrel(ServerLevel level, BlockPos pos, ItemStack single) {
+        if (!isValidGroundSpot(level, pos)) {
+            return false;
+        }
+        BlockState barrelState = Blocks.BARREL.defaultBlockState().setValue(BarrelBlock.FACING, Direction.UP);
+        if (!barrelState.canSurvive(level, pos) || !level.setBlock(pos, barrelState, Block.UPDATE_ALL)) {
+            return false;
+        }
+        BlockEntity blockEntity = level.getBlockEntity(pos);
+        if (blockEntity instanceof BarrelBlockEntity barrel && insertOne(barrel, single)) {
+            return true;
+        }
+        // A newly-created barrel without a usable inventory is not a valid fallback destination.
+        level.removeBlock(pos, false);
+        return false;
+    }
+
+    private static boolean insertOne(BarrelBlockEntity barrel, ItemStack single) {
+        for (int slot = 0; slot < barrel.getContainerSize(); slot++) {
+            ItemStack existing = barrel.getItem(slot);
+            if (existing.isEmpty()) {
+                barrel.setItem(slot, single.copy());
+                barrel.setChanged();
+                return true;
+            }
+            int limit = Math.min(existing.getMaxStackSize(), barrel.getMaxStackSize());
+            if (ItemStack.isSameItemSameComponents(existing, single) && existing.getCount() < limit) {
+                existing.grow(1);
+                barrel.setChanged();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isValidGroundSpot(ServerLevel level, BlockPos pos) {
+        BlockPos below = pos.below();
+        return level.getBlockState(pos).isAir()
+            && level.getBlockState(below).isFaceSturdy(level, below, Direction.UP);
+    }
+
+    /** Legacy buried data is only recovered when a prior version stored it; new despawns never bury. */
     @SubscribeEvent
     public static void onBlockBreak(BlockEvent.BreakEvent event) {
         if (!(event.getLevel() instanceof ServerLevel level)) {

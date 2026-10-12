@@ -4,17 +4,35 @@ Immersive item despawn for Minecraft (NeoForge 1.21.1, Java 21). Mod ID:
 `dynamicdespawn`. MIT licensed. See epic MINECRAFT-145, story MINECRAFT-147
 (this repo's vertical slice), task MINECRAFT-151 (this implementation).
 
-When a dropped-item stack would naturally despawn, one item from the stack
-settles into the world (or is buried nearby if it can't be placed), the stack
-shrinks by exactly one, and the remaining items get a fresh despawn timer. A
-stack of 1 leaves nothing behind. Repeat at the next natural despawn -- one
-despawn cycle handles one item.
+When a dropped-item stack would naturally despawn, exactly one item is handled
+and the remainder gets a fresh despawn timer. BLOCK items search the current
+position, randomized horizontal neighbours, then the position above; a failed
+search consumes one item. Other items are inserted into a nearby non-full
+barrel, or a newly placed barrel, and consume one item if no storage exists.
+A stack of 1 leaves nothing behind. Repeat at the next natural despawn.
 
-## Current state: vertical slice (MINECRAFT-147)
+## Current state: authoritative despawn path (MINECRAFT-308)
 
 One item type end-to-end, in survival, single player or multiplayer. No
 breadth across item kinds, no custom rendering/animation, no config UI yet
-(see MINECRAFT-145's decision comment for the full scope boundary).
+(see MINECRAFT-145's decision comment for the full scope boundary). The
+earlier settle/bury design described below is retained as historical context;
+new despawn attempts use the ordered placement and barrel-storage path.
+
+## Authoritative MINECRAFT-308 behavior
+
+`DespawnGameplay` tries BLOCK positions in this order: the current item
+position, the four horizontal neighbours in a randomized permutation, then the
+position above. The first valid `BlockItem` write consumes one item; if every
+candidate fails, one item is deleted and is never written to
+`BuriedItemsSavedData`.
+
+For non-BLOCK items, loaded barrels within 16 blocks are searched first. Full
+barrels are skipped and one item is inserted into the first available slot or
+partial matching stack. If no existing barrel accepts it, the same candidate
+order is used to create a barrel and insert one item. If that also fails, one
+item is deleted. A stack larger than one shrinks by one and gets a full timer
+reset; a stack of one follows vanilla expiry and leaves no remainder.
 
 ## Design decisions
 
